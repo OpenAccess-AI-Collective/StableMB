@@ -7,6 +7,7 @@ import signal
 import tqdm
 import gzip
 import numpy as np
+import os
 import torch
 import wandb
 import torch.optim as optim
@@ -82,11 +83,11 @@ def main():
         config={"learning_rate": LEARNING_RATE},
     )
 
-    wikipedia_ds = load_dataset("lsb/enwiki20230101")
+    wikipedia_ds = load_dataset("togethercomputer/RedPajama-Data-1T-Sample")
 
     # instantiate GPT-like decoder model
 
-    device_properties = torch.cuda.get_device_properties(torch.device('cuda'))
+    device_properties = torch.cuda.get_device_properties(torch.device(f'cuda:{os.environ["LOCAL_RANK"]}'))
 
     if device_properties.major == 8 and device_properties.minor == 0:
         flash_attn = False  # set to false if using A100

@@ -1,0 +1,9 @@
+accelerate
+scipy
+datasets
+bitsandbytes
+wandb
+einops
+tqdm
+beartype
+torch
