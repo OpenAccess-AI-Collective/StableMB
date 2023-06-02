@@ -32,11 +32,13 @@ TOTAL_BATCH_EST = 622614  # estimate if available
 def calculate_sizes(total_batches):
     # constants
     WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
-    # TOTAL_BATCHES = 15000000 # approximately 15M btaches of 8192 for 1 epoch of wikipedia
     num_batches = total_batches // BATCH_SIZE // WORLD_SIZE // GRADIENT_ACCUMULATE_EVERY
-    validate_every = 1600 // BATCH_SIZE // WORLD_SIZE // GRADIENT_ACCUMULATE_EVERY
-    generate_every = 8000 // BATCH_SIZE // WORLD_SIZE // GRADIENT_ACCUMULATE_EVERY
-    checkpoint_every = 3200 // BATCH_SIZE // WORLD_SIZE // GRADIENT_ACCUMULATE_EVERY
+    # validate_every = 1600 // BATCH_SIZE // WORLD_SIZE // GRADIENT_ACCUMULATE_EVERY
+    # generate_every = 8000 // BATCH_SIZE // WORLD_SIZE // GRADIENT_ACCUMULATE_EVERY
+    # checkpoint_every = 3200 // BATCH_SIZE // WORLD_SIZE // GRADIENT_ACCUMULATE_EVERY
+    validate_every = 10
+    generate_every = 0
+    checkpoint_every = 10
     return num_batches, validate_every, generate_every, checkpoint_every
 
 # helpers
