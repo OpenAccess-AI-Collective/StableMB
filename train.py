@@ -1,3 +1,6 @@
+import re
+from pathlib import Path
+
 from accelerate import Accelerator
 from MEGABYTE_pytorch import MEGABYTE
 import bitsandbytes as bnb
@@ -27,6 +30,7 @@ LEARNING_RATE = 4e-4
 BATCH_EST = 1
 TOTAL_BATCH_EST = 622614  # estimate if available
 # redpajama sample -> 622614
+RESUME_FROM_CHECKPOINT = None
 
 
 def calculate_sizes(total_batches):
@@ -38,7 +42,7 @@ def calculate_sizes(total_batches):
     # checkpoint_every = 3200 // BATCH_SIZE // WORLD_SIZE // GRADIENT_ACCUMULATE_EVERY
     validate_every = 10
     generate_every = 0
-    checkpoint_every = 10
+    checkpoint_every = 5
     return num_batches, validate_every, generate_every, checkpoint_every
 
 # helpers
@@ -184,7 +188,26 @@ def main():
 
     pbar = tqdm.tqdm(range(num_batches), mininterval=10., desc='training')
     device = torch.cuda.current_device()
+    if RESUME_FROM_CHECKPOINT:
+        if isinstance(RESUME_FROM_CHECKPOINT, int):
+            model.load_state_dict(torch.load(f"./checkpoints/model_out.chkpt_{RESUME_FROM_CHECKPOINT}.pt"))
+        elif RESUME_FROM_CHECKPOINT is True:
+            # Get all checkpoint files
+            files = list(Path("./checkpoints/").glob("model_out.chkpt_*.pt"))
+
+            # Extract indices from filenames and find the max
+            indices = [int(re.search('model_out.chkpt_(\d+).pt', f.name).group(1)) for f in files]
+            max_index = max(indices)
+
+            # Get the file with max index
+            max_index_file = Path(f"./checkpoints/model_out.chkpt_{max_index}.pt")
+            model.load_state_dict(torch.load(str(max_index_file)))
+
+    val_loss_str = ""
     for i in pbar:
+        if RESUME_FROM_CHECKPOINT and i <= RESUME_FROM_CHECKPOINT:
+            continue
+
         model.train()
 
         for __ in range(GRADIENT_ACCUMULATE_EVERY):
@@ -194,7 +217,8 @@ def main():
 
         reserved = torch.cuda.memory_reserved(device)
         reserved_gb = reserved / 1024 / 1024 / 1024
-        pbar.set_description(f'reserved_gb: {reserved_gb}, training loss: {train_loss.item()}')
+        train_loss_str = train_loss.item()
+        pbar.set_description(f'reserved_gb: {reserved_gb}, training loss: {train_loss_str}, validation loss: {val_loss_str}')
         torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
         optimizer.step()
         optimizer.zero_grad()
@@ -203,13 +227,14 @@ def main():
             model.eval()
             with torch.no_grad():
                 loss = model(next(val_loader), return_loss = True)
-                pbar.set_description(f'reserved_gb: {reserved_gb}, training loss: {train_loss.item()}, validation loss: {loss.item()}')
+                val_loss_str = loss.item()
+                pbar.set_description(f'reserved_gb: {reserved_gb}, training loss: {train_loss_str}, validation loss: {val_loss_str}')
                 accelerator.log({"train_loss": train_loss.item(), "valid_loss": loss.item()})
         else:
             accelerator.log({"train_loss": train_loss.item()})
 
         if i % checkpoint_every == 0:
-            torch.save(model.state_dict(), f"./checkpoints/model_out.chkpt_{i}pt")
+            torch.save(model.state_dict(), f"./checkpoints/model_out.chkpt_{i}.pt")
 
     torch.save(model.state_dict(), 'model_out.pt')
 
