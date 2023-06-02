@@ -19,7 +19,7 @@ from bitsandbytes.optim.adam import Adam8bit
 from sophiag import SophiaG
 
 
-BATCH_SIZE = 1
+BATCH_SIZE = 6
 GRADIENT_ACCUMULATE_EVERY = 128
 PRIME_LEN = 100
 SEQ_LEN = 8192
@@ -33,10 +33,10 @@ def calculate_sizes(total_batches):
     # constants
     WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
     # TOTAL_BATCHES = 15000000 # approximately 15M btaches of 8192 for 1 epoch of wikipedia
-    num_batches = total_batches // WORLD_SIZE // GRADIENT_ACCUMULATE_EVERY
-    validate_every = 1600 // WORLD_SIZE // GRADIENT_ACCUMULATE_EVERY
-    generate_every = 8000 // WORLD_SIZE // GRADIENT_ACCUMULATE_EVERY
-    checkpoint_every = 3200 // WORLD_SIZE // GRADIENT_ACCUMULATE_EVERY
+    num_batches = total_batches // BATCH_SIZE // WORLD_SIZE // GRADIENT_ACCUMULATE_EVERY
+    validate_every = 1600 // BATCH_SIZE // WORLD_SIZE // GRADIENT_ACCUMULATE_EVERY
+    generate_every = 8000 // BATCH_SIZE // WORLD_SIZE // GRADIENT_ACCUMULATE_EVERY
+    checkpoint_every = 3200 // BATCH_SIZE // WORLD_SIZE // GRADIENT_ACCUMULATE_EVERY
     return num_batches, validate_every, generate_every, checkpoint_every
 
 # helpers
@@ -178,6 +178,7 @@ def main():
     )
 
     pbar = tqdm.tqdm(range(num_batches), mininterval=10., desc='training')
+    device = torch.cuda.current_device()
     for i in pbar:
         model.train()
 
@@ -186,7 +187,9 @@ def main():
             accelerator.backward(train_loss)
             # loss.backward()
 
-        pbar.set_description(f'training loss: {train_loss.item()}')
+        reserved = torch.cuda.memory_reserved(device)
+        reserved_mb = reserved / 1024 / 1024 / 1024
+        pbar.set_description(f'reserved_mb: {reserved_mb}, training loss: {train_loss.item()}')
         torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
         optimizer.step()
         optimizer.zero_grad()
@@ -195,14 +198,14 @@ def main():
             model.eval()
             with torch.no_grad():
                 loss = model(next(val_loader), return_loss = True)
-                pbar.set_description(f'validation loss: {loss.item()}')
+                pbar.set_description(f'reserved_mb: {reserved_mb}, training loss: {train_loss.item()}, validation loss: {loss.item()}')
                 accelerator.log({"train_loss": train_loss.item(), "valid_loss": loss.item()})
             torch.save(model.state_dict(), 'path_to_save_your_model.pt')
         else:
             accelerator.log({"train_loss": train_loss.item()})
 
         if i % checkpoint_every == 0:
-            torch.save(model.state_dict(), f"model_out.chkpt_{i}pt")
+            torch.save(model.state_dict(), f"./checkpoints/model_out.chkpt_{i}pt")
 
     torch.save(model.state_dict(), 'model_out.pt')
 
