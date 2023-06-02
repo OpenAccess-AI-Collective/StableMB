@@ -12,6 +12,7 @@ import tqdm
 import gzip
 import numpy as np
 import os
+import tempfile
 import torch
 import wandb
 import torch.optim as optim
@@ -234,7 +235,10 @@ def main():
             accelerator.log({"train_loss": train_loss.item()})
 
         if i % checkpoint_every == 0:
-            torch.save(model.state_dict(), f"./checkpoints/model_out.chkpt_{i}.pt")
+            with tempfile.NamedTemporaryFile(dir='./checkpoints/', delete=False) as f:
+                torch.save(model.state_dict(), f)
+                temp_name = f.name
+            os.rename(temp_name, f"./checkpoints/model_out.chkpt_{i}.pt")
 
     torch.save(model.state_dict(), 'model_out.pt')
 
