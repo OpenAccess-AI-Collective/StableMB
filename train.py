@@ -32,7 +32,7 @@ BATCH_EST = 1
 TOTAL_BATCH_EST = 622614  # estimate if available
 # redpajama sample -> 622614
 RESUME_FROM_CHECKPOINT = None
-
+MODEL_BASE = None
 
 def calculate_sizes(total_batches):
     # constants
@@ -109,7 +109,7 @@ def main():
 
     accelerator = Accelerator(
         log_with="wandb",
-        # gradient_accumulation_steps=GRADIENT_ACCUMULATE_EVERY,  # TODO
+        gradient_accumulation_steps=GRADIENT_ACCUMULATE_EVERY,  # TODO
     )
     accelerator.init_trackers(
         project_name="smb-wikipedia",
@@ -150,6 +150,8 @@ def main():
     #     attn_dropout=0.1,
     #     flash_attn = True,
     # ).to(accelerator.device, dtype=torch.bfloat16)
+    if MODEL_BASE and isinstance(MODEL_BASE, str) and Path(MODEL_BASE).is_file():
+        model.load_state_dict(torch.load(MODEL_BASE))
 
     print_trainable_parameters(model)
     # prepare enwik8 data
@@ -189,6 +191,7 @@ def main():
 
     pbar = tqdm.tqdm(range(num_batches), mininterval=10., desc='training')
     device = torch.cuda.current_device()
+    global RESUME_FROM_CHECKPOINT
     if RESUME_FROM_CHECKPOINT:
         if isinstance(RESUME_FROM_CHECKPOINT, int):
             model.load_state_dict(torch.load(f"./checkpoints/model_out.chkpt_{RESUME_FROM_CHECKPOINT}.pt"))
@@ -203,6 +206,7 @@ def main():
             # Get the file with max index
             max_index_file = Path(f"./checkpoints/model_out.chkpt_{max_index}.pt")
             model.load_state_dict(torch.load(str(max_index_file)))
+            RESUME_FROM_CHECKPOINT = max_index  # set this so it can properly skip later
 
     val_loss_str = ""
     for i in pbar:
@@ -210,19 +214,22 @@ def main():
             continue
 
         model.train()
+        # for __ in range(GRADIENT_ACCUMULATE_EVERY):
+        #     train_loss = model(next(train_loader), return_loss = True)
 
-        for __ in range(GRADIENT_ACCUMULATE_EVERY):
+        with accelerator.accumulate(model):
             train_loss = model(next(train_loader), return_loss = True)
             accelerator.backward(train_loss)
             # loss.backward()
 
+            train_loss_str = train_loss.item()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5) # what does this do?
+            optimizer.step()
+            optimizer.zero_grad()
+
         reserved = torch.cuda.memory_reserved(device)
         reserved_gb = reserved / 1024 / 1024 / 1024
-        train_loss_str = train_loss.item()
         pbar.set_description(f'reserved_gb: {reserved_gb}, training loss: {train_loss_str}, validation loss: {val_loss_str}')
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
-        optimizer.step()
-        optimizer.zero_grad()
 
         if validate_every and i % validate_every == 0:
             model.eval()
