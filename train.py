@@ -55,10 +55,13 @@ def print_trainable_parameters(model):
             trainable_params += param.numel()
     print(f"trainable params: {trainable_params:,} || all params: {all_param:,} || trainable: {100 * trainable_params / all_param}")
 
+
 def cycle(loader, infinite=True):
     while True:
         for data in loader:
             yield data
+        if not infinite:
+            break
 
 def decode_token(token):
     return str(chr(max(32, token)))
@@ -190,8 +193,8 @@ def main():
             # loss.backward()
 
         reserved = torch.cuda.memory_reserved(device)
-        reserved_mb = reserved / 1024 / 1024 / 1024
-        pbar.set_description(f'reserved_mb: {reserved_mb}, training loss: {train_loss.item()}')
+        reserved_gb = reserved / 1024 / 1024 / 1024
+        pbar.set_description(f'reserved_gb: {reserved_gb}, training loss: {train_loss.item()}')
         torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
         optimizer.step()
         optimizer.zero_grad()
@@ -200,9 +203,8 @@ def main():
             model.eval()
             with torch.no_grad():
                 loss = model(next(val_loader), return_loss = True)
-                pbar.set_description(f'reserved_mb: {reserved_mb}, training loss: {train_loss.item()}, validation loss: {loss.item()}')
+                pbar.set_description(f'reserved_gb: {reserved_gb}, training loss: {train_loss.item()}, validation loss: {loss.item()}')
                 accelerator.log({"train_loss": train_loss.item(), "valid_loss": loss.item()})
-            torch.save(model.state_dict(), 'path_to_save_your_model.pt')
         else:
             accelerator.log({"train_loss": train_loss.item()})
 
