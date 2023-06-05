@@ -257,7 +257,7 @@ def main():
             # loss.backward()
 
             train_loss_str = train_loss.item()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5) # what does this do?
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0) # what does this do?
             optimizer.step()
             optimizer.zero_grad()
 
