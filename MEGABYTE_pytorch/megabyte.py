@@ -365,7 +365,7 @@ class MEGABYTE(nn.Module):
 
         prev_stage_tokens_repr = None
 
-        # spatial tokens is tokens with depth pos reduced along depth dimension + spatial positions        
+        # spatial tokens is tokens with depth pos reduced along depth dimension + spatial positions
 
         for stage_start_tokens, stage_tokens, transformer, proj in zip(self.start_tokens, tokens_at_stages, self.transformers, self.to_next_transformer_projections):
             stage_tokens, ps = pack_one(stage_tokens, '* n d')

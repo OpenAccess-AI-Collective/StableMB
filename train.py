@@ -33,6 +33,7 @@ TOTAL_BATCH_EST = 622614  # estimate if available
 # redpajama sample -> 622614
 RESUME_FROM_CHECKPOINT = None
 MODEL_BASE = None
+INFERENCE = None  # set this to a text file for completion, use with MODEL_BASE
 
 def calculate_sizes(total_batches):
     # constants
@@ -104,23 +105,24 @@ def get_ds_len(ds, seq_len):
     return math.ceil(length / seq_len)
 
 
+def generate(model, text):
+    x = np.frombuffer(text.encode(), dtype=np.uint8).copy()
+    input = torch.from_numpy(x)
+
+    print(f'%s \n\n %s', (text, '*' * 100))
+    sample = model.generate(input[None, :].cuda())
+    sample = sample.flatten(1)
+    output_str = decode_tokens(sample[0][len(input):])
+    print(output_str)
+
+
 def main():
-    wandb.login()
-
-    accelerator = Accelerator(
-        log_with="wandb",
-        gradient_accumulation_steps=GRADIENT_ACCUMULATE_EVERY,  # TODO
-    )
-    accelerator.init_trackers(
-        project_name="smb-wikipedia",
-        config={"learning_rate": LEARNING_RATE},
-    )
-
     raw_ds = load_dataset("togethercomputer/RedPajama-Data-1T-Sample")
 
     # instantiate GPT-like decoder model
 
-    device_properties = torch.cuda.get_device_properties(torch.device('cuda'))
+    # device_properties = torch.cuda.get_device_properties(torch.device('cuda'))
+    device_properties = torch.cuda.get_device_properties(torch.device(f'cuda:{os.environ["LOCAL_RANK"]}'))
 
     if device_properties.major == 8 and device_properties.minor == 0:
         flash_attn = False  # set to false if using A100
@@ -131,14 +133,14 @@ def main():
     # global: D: 1024, L: 14
     # local: D: 1024, L: 18
     model = MEGABYTE(
-        num_tokens = 8192,
+        num_tokens = 256,
         dim = 384,
         depth = (24, 12),
         max_seq_len = (2048, 1024),
         dim_head = 64,
         heads=16,
         flash_attn = flash_attn
-    ).to(accelerator.device, dtype=torch.bfloat16)
+    )
     # model = MEGABYTE(
     #     num_tokens = 8192,
     #     dim = (768, 1024),  # embeddings dimenstion -> d_head
@@ -151,7 +153,26 @@ def main():
     #     flash_attn = True,
     # ).to(accelerator.device, dtype=torch.bfloat16)
     if MODEL_BASE and isinstance(MODEL_BASE, str) and Path(MODEL_BASE).is_file():
+        """
+        this is code to strip the "module." prefix off module names if it's incorrect
+        """
+        # from collections import OrderedDict
+        # state_dict = torch.load(MODEL_BASE)
+        # new_state_dict = OrderedDict()
+        # for k, v in state_dict.items():
+        #     name = k[7:] # remove module.
+        #     new_state_dict[name] = v
+        # model.load_state_dict(new_state_dict)
+
         model.load_state_dict(torch.load(MODEL_BASE))
+
+    if INFERENCE and isinstance(INFERENCE, str) and Path(INFERENCE).is_file():
+        with open(INFERENCE, 'r') as fin:
+            text = "\n".join(fin.readlines())
+        model.cuda()
+        model.eval()
+        generate(model, text)
+        return
 
     print_trainable_parameters(model)
     # prepare enwik8 data
@@ -179,8 +200,21 @@ def main():
     # optimizer = Adam8bit(model.parameters(), lr=LEARNING_RATE)
     optimizer = SophiaG(model.parameters(), lr=LEARNING_RATE)
 
+    wandb.login()
+
+    accelerator = Accelerator(
+        log_with="wandb",
+        gradient_accumulation_steps=GRADIENT_ACCUMULATE_EVERY,
+    )
+    accelerator.init_trackers(
+        project_name="smb-wikipedia",
+        config={"learning_rate": LEARNING_RATE},
+    )
+
+    model.to(accelerator.device, dtype=torch.bfloat16)
+
     # training
-    model, optimizer, training_dataloader, scheduler = accelerator.prepare(
+    model, optimizer, train_loader, val_loader = accelerator.prepare(
         model, optimizer, train_loader, val_loader
     )
 
@@ -242,10 +276,12 @@ def main():
             accelerator.log({"train_loss": train_loss.item()})
 
         if i % checkpoint_every == 0:
-            with tempfile.NamedTemporaryFile(dir='./checkpoints/', delete=False) as f:
-                torch.save(model.state_dict(), f)
-                temp_name = f.name
-            os.rename(temp_name, f"./checkpoints/model_out.chkpt_{i}.pt")
+            accelerator.wait_for_everyone()
+            if accelerator.is_main_process:
+                with tempfile.NamedTemporaryFile(dir='./checkpoints/', delete=False) as f:
+                    accelerator.save(model.state_dict(), f.name)
+                    temp_name = f.name
+                    os.rename(temp_name, f"./checkpoints/model_out.chkpt_{i}.pt")
 
     torch.save(model.state_dict(), 'model_out.pt')
 
