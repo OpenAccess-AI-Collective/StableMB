@@ -8,3 +8,5 @@ einops
 tqdm
 beartype
 torch
+transformers
+click

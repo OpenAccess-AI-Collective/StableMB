@@ -1,9 +1,11 @@
 import re
+import sys
 from pathlib import Path
+from typing import Optional
 
+import click
 from accelerate import Accelerator
 from MEGABYTE_pytorch import MEGABYTE
-import bitsandbytes as bnb
 
 import math
 import random
@@ -21,13 +23,13 @@ from torch.nn import functional as F
 from torch.utils.data import DataLoader, IterableDataset
 from bitsandbytes.optim.adam import Adam8bit
 from sophiag import SophiaG
-
+from transformers.optimization import get_polynomial_decay_schedule_with_warmup
 
 BATCH_SIZE = 6
 GRADIENT_ACCUMULATE_EVERY = 128
 PRIME_LEN = 100
 SEQ_LEN = 8192
-LEARNING_RATE = 4e-4
+LEARNING_RATE = 2e-4
 BATCH_EST = 1
 TOTAL_BATCH_EST = 622614  # estimate if available
 # redpajama sample -> 622614
@@ -42,9 +44,9 @@ def calculate_sizes(total_batches):
     # validate_every = 1600 // BATCH_SIZE // WORLD_SIZE // GRADIENT_ACCUMULATE_EVERY
     # generate_every = 8000 // BATCH_SIZE // WORLD_SIZE // GRADIENT_ACCUMULATE_EVERY
     # checkpoint_every = 3200 // BATCH_SIZE // WORLD_SIZE // GRADIENT_ACCUMULATE_EVERY
-    validate_every = 10
+    validate_every = 50
     generate_every = 0
-    checkpoint_every = 5
+    checkpoint_every = 200
     return num_batches, validate_every, generate_every, checkpoint_every
 
 # helpers
@@ -107,7 +109,7 @@ def get_ds_len(ds, seq_len):
 
 def generate(model, text):
     x = np.frombuffer(text.encode(), dtype=np.uint8).copy()
-    input = torch.from_numpy(x)
+    input = torch.from_numpy(x).long()
 
     print(f'%s \n\n %s', (text, '*' * 100))
     sample = model.generate(input[None, :].cuda())
@@ -116,13 +118,27 @@ def generate(model, text):
     print(output_str)
 
 
-def main():
-    raw_ds = load_dataset("togethercomputer/RedPajama-Data-1T-Sample")
+@click.group(invoke_without_command=True)
+@click.pass_context
+def cli(ctx):
+    if ctx.invoked_subcommand is None:
+        main()
 
-    # instantiate GPT-like decoder model
 
+@click.argument('filename', type=click.Path(exists=True))
+@cli.command()
+def predict(filename):
+    model = build_model()
+    model = load_pretrained(model, filename)
+    prompt = "\n".join([line for line in sys.stdin]).strip()
+    model.cuda()
+    model.eval()
+    generate(model, prompt)
+
+
+def build_model():
     # device_properties = torch.cuda.get_device_properties(torch.device('cuda'))
-    device_properties = torch.cuda.get_device_properties(torch.device(f'cuda:{os.environ["LOCAL_RANK"]}'))
+    device_properties = torch.cuda.get_device_properties(torch.device(f'cuda:{os.environ.get("LOCAL_RANK", 0)}'))
 
     if device_properties.major == 8 and device_properties.minor == 0:
         flash_attn = False  # set to false if using A100
@@ -130,54 +146,48 @@ def main():
         flash_attn = True
     torch.backends.cuda.matmul.allow_tf32 = True
 
-    # global: D: 1024, L: 14
-    # local: D: 1024, L: 18
-    model = MEGABYTE(
+    return MEGABYTE(
         num_tokens = 256,
-        dim = 384,
-        depth = (24, 12),
-        max_seq_len = (2048, 1024),
+        dim = 384,  # embeddings dimenstion -> d_head
+        depth = (24, 12),  # numof layers => #L
+        max_seq_len = (1024, 768),  # number of embeddings -> d_model
         dim_head = 64,
         heads=16,
         flash_attn = flash_attn
     )
-    # model = MEGABYTE(
-    #     num_tokens = 8192,
-    #     dim = (768, 1024),  # embeddings dimenstion -> d_head
-    #     max_seq_len = (2048, 1024),  # number of embeddings -> d_model
-    #     depth = (14, 18),  # numof layers => #L
-    #     dim_head = 92,
-    #     heads = 16,
-    #     ff_dropout=0.1,
-    #     attn_dropout=0.1,
-    #     flash_attn = True,
-    # ).to(accelerator.device, dtype=torch.bfloat16)
-    if MODEL_BASE and isinstance(MODEL_BASE, str) and Path(MODEL_BASE).is_file():
+
+
+def load_pretrained(model, pretrained_path):
+    if pretrained_path and isinstance(pretrained_path, str) and Path(pretrained_path).is_file():
         """
         this is code to strip the "module." prefix off module names if it's incorrect
         """
         # from collections import OrderedDict
-        # state_dict = torch.load(MODEL_BASE)
+        # state_dict = torch.load(pretrained_path)
         # new_state_dict = OrderedDict()
         # for k, v in state_dict.items():
         #     name = k[7:] # remove module.
         #     new_state_dict[name] = v
         # model.load_state_dict(new_state_dict)
 
-        model.load_state_dict(torch.load(MODEL_BASE))
+        model.load_state_dict(torch.load(pretrained_path))
+    return model
 
-    if INFERENCE and isinstance(INFERENCE, str) and Path(INFERENCE).is_file():
-        with open(INFERENCE, 'r') as fin:
-            text = "\n".join(fin.readlines())
-        model.cuda()
-        model.eval()
-        generate(model, text)
-        return
+
+@click.argument('--auto-resume/--no-auto-resume', type=bool, default=False)
+def main(auto_resume=False):
+    # raw_ds = load_dataset("togethercomputer/RedPajama-Data-1T")
+    raw_ds = load_dataset("togethercomputer/RedPajama-Data-1T-Sample")
+
+    # instantiate GPT-like decoder model
+
+    model = build_model()
+    model = load_pretrained(model, MODEL_BASE)
 
     print_trainable_parameters(model)
     # prepare enwik8 data
 
-    ds = raw_ds["train"].train_test_split(test_size=0.001)
+    ds = raw_ds["train"].train_test_split(test_size=0.01)
     # train_dataset = WrappedDataset(ds["train"], SEQ_LEN)
     # val_dataset = WrappedDataset(ds["test"], SEQ_LEN)
     # train_loader  = cycle(DataLoader(train_dataset, batch_size = BATCH_SIZE))
@@ -196,9 +206,10 @@ def main():
     # optimizer
     num_batches, validate_every, generate_every, checkpoint_every = calculate_sizes(TOTAL_BATCHES)
 
-    # optim = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
-    # optimizer = Adam8bit(model.parameters(), lr=LEARNING_RATE)
-    optimizer = SophiaG(model.parameters(), lr=LEARNING_RATE)
+    # optim = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE, betas=(0.9, 0.98))
+    # optimizer = Adam8bit(model.parameters(), lr=LEARNING_RATE, betas=(0.9, 0.98), weight_decay=0.1)
+    optimizer = SophiaG(model.parameters(), lr=LEARNING_RATE, betas=(0.9, 0.98), weight_decay=0.1)
+    lr_scheduler = get_polynomial_decay_schedule_with_warmup(optimizer, 500, num_batches)
 
     wandb.login()
 
@@ -214,8 +225,8 @@ def main():
     model.to(accelerator.device, dtype=torch.bfloat16)
 
     # training
-    model, optimizer, train_loader, val_loader = accelerator.prepare(
-        model, optimizer, train_loader, val_loader
+    model, optimizer, train_loader, val_loader, lr_scheduler = accelerator.prepare(
+        model, optimizer, train_loader, val_loader, lr_scheduler
     )
 
     signal.signal(
@@ -226,10 +237,10 @@ def main():
     pbar = tqdm.tqdm(range(num_batches), mininterval=10., desc='training')
     device = torch.cuda.current_device()
     global RESUME_FROM_CHECKPOINT
-    if RESUME_FROM_CHECKPOINT:
+    if RESUME_FROM_CHECKPOINT or auto_resume:
         if isinstance(RESUME_FROM_CHECKPOINT, int):
             model.load_state_dict(torch.load(f"./checkpoints/model_out.chkpt_{RESUME_FROM_CHECKPOINT}.pt"))
-        elif RESUME_FROM_CHECKPOINT is True:
+        elif RESUME_FROM_CHECKPOINT is True or auto_resume:
             # Get all checkpoint files
             files = list(Path("./checkpoints/").glob("model_out.chkpt_*.pt"))
 
@@ -248,18 +259,16 @@ def main():
             continue
 
         model.train()
-        # for __ in range(GRADIENT_ACCUMULATE_EVERY):
-        #     train_loss = model(next(train_loader), return_loss = True)
 
         with accelerator.accumulate(model):
             train_loss = model(next(train_loader), return_loss = True)
             accelerator.backward(train_loss)
-            # loss.backward()
 
             train_loss_str = train_loss.item()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0) # what does this do?
             optimizer.step()
             optimizer.zero_grad()
+            lr_scheduler.step()
 
         reserved = torch.cuda.memory_reserved(device)
         reserved_gb = reserved / 1024 / 1024 / 1024
@@ -282,9 +291,10 @@ def main():
                     accelerator.save(model.state_dict(), f.name)
                     temp_name = f.name
                     os.rename(temp_name, f"./checkpoints/model_out.chkpt_{i}.pt")
+                    # TODO capture optimizer state
 
     torch.save(model.state_dict(), 'model_out.pt')
 
 
 if __name__ == "__main__":
-    main()
+    cli()
